@@ -97,3 +97,165 @@ async function getWorkspace(orgId, userId) {
   const accounts = await getAccounts(orgId);
   return { ...emptyState, ...saved, accounts };
 }
+
+async function saveAccounts(orgId, accounts) {
+  for (const account of accounts || []) {
+    if (!account.code || !account.name) continue;
+
+    await pool.query(
+      `INSERT INTO public.accounts (org_id, code, name, sub_account, sub_linkage, fs_label, account_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (org_id, code)
+       DO UPDATE SET
+         name = EXCLUDED.name,
+         sub_account = EXCLUDED.sub_account,
+         sub_linkage = EXCLUDED.sub_linkage,
+         fs_label = EXCLUDED.fs_label,
+         account_type = EXCLUDED.account_type,
+         is_active = true,
+         updated_at = now()`,
+      [
+        orgId,
+        account.code,
+        account.name,
+        account.subAccount || account.sub_account || null,
+        account.subLinkage || account.sub_linkage || null,
+        account.fsLabel || account.fs_label || 'Balance Sheet',
+        account.accountType || account.account_type || 'Asset'
+      ]
+    );
+  }
+}
+
+app.get('/', (_req, res) => {
+  res.json({ status: 'ok', app: 'Ledgr Undeniable API', ts: new Date().toISOString() });
+});
+
+app.get(['/health', '/api/health'], async (_req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ status: 'ok', db: 'connected', ts: new Date().toISOString() });
+  } catch (error) {
+    res.status(500).json({ status: 'error', db: error.message });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const password = String(req.body.password || '');
+    if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+
+    const { rows } = await pool.query(
+      `SELECT u.*, o.slug AS org_slug
+       FROM public.users u
+       LEFT JOIN public.organizations o ON o.id = u.org_id
+       WHERE lower(u.email) = lower($1)
+         AND u.is_active = true
+       LIMIT 1`,
+      [email]
+    );
+
+    const user = rows[0];
+    if (!user || !user.password_hash) return res.status(401).json({ error: 'Invalid email or password' });
+
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Invalid email or password' });
+
+    await pool.query('UPDATE public.users SET last_login_at = now() WHERE id = $1', [user.id]);
+
+    res.json({
+      token: signToken(user),
+      user: publicUser(user)
+    });
+  } catch (error) {
+    console.error('login error', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/state', auth, async (req, res) => {
+  try {
+    const state = await getWorkspace(req.user.orgId, req.user.id);
+    res.json(state);
+  } catch (error) {
+    console.error('state get error', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/state', auth, async (req, res) => {
+  try {
+    const incoming = { ...emptyState, ...req.body };
+    const accounts = Array.isArray(incoming.accounts) ? incoming.accounts : [];
+    delete incoming.accounts;
+
+    await pool.query(
+      `INSERT INTO public.workspace (org_id, user_id, state)
+       VALUES ($1, $2, $3::jsonb)
+       ON CONFLICT (org_id, user_id)
+       DO UPDATE SET state = EXCLUDED.state, updated_at = now()`,
+      [req.user.orgId, req.user.id, JSON.stringify(incoming)]
+    );
+
+    await saveAccounts(req.user.orgId, accounts);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('state save error', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/accounts', auth, async (req, res) => {
+  try {
+    res.json(await getAccounts(req.user.orgId));
+  } catch {
+    res.json([]);
+  }
+});
+
+app.get('/api/workflow/specs', auth, async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT spec_key, display_name, purpose, headers, dependencies
+       FROM public.workflow_specs
+       ORDER BY spec_key`
+    );
+    res.json(rows);
+  } catch {
+    res.json([]);
+  }
+});
+
+app.post('/api/ingest/upload', auth, upload.single('file'), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file uploaded' });
+
+    const { rows } = await pool.query(
+      `INSERT INTO public.uploads (org_id, user_id, name, rows, status, payload)
+       VALUES ($1, $2, $3, 0, 'synced', $4::jsonb)
+       RETURNING id`,
+      [
+        req.user.orgId,
+        req.user.id,
+        file.originalname,
+        JSON.stringify({ mimetype: file.mimetype, size: file.size })
+      ]
+    );
+
+    res.json({
+      uploadId: rows[0].id,
+      total: 0,
+      matched: 0,
+      review: 0
+    });
+  } catch (error) {
+    console.error('upload error', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Ledgr Undeniable API running on 0.0.0.0:${PORT}`);
+});
