@@ -1,5 +1,38 @@
--- Clean seed for index-9.
--- Do not insert entities, properties, vendors, rules, fiscal periods, raw transactions, or journal entries.
+-- Safe login-only seed for Ledgr.
+-- Run this after 01_schema.sql.
+--
+-- IMPORTANT:
+-- Replace PASTE_BCRYPT_HASH_HERE with your real bcrypt hash.
+-- Do not put your plain SaaS password here.
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+ALTER TABLE public.organizations
+ADD COLUMN IF NOT EXISTS slug text;
+
+ALTER TABLE public.organizations
+ADD COLUMN IF NOT EXISTS plan text DEFAULT 'starter';
+
+ALTER TABLE public.organizations
+ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
+
+ALTER TABLE public.users
+ADD COLUMN IF NOT EXISTS org_id uuid;
+
+ALTER TABLE public.users
+ADD COLUMN IF NOT EXISTS full_name text;
+
+ALTER TABLE public.users
+ADD COLUMN IF NOT EXISTS password_hash text;
+
+ALTER TABLE public.users
+ADD COLUMN IF NOT EXISTS role text DEFAULT 'bookkeeper';
+
+ALTER TABLE public.users
+ADD COLUMN IF NOT EXISTS is_active boolean DEFAULT true;
+
+ALTER TABLE public.users
+ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
 
 INSERT INTO public.organizations (id, name, slug, plan)
 VALUES (
@@ -14,7 +47,6 @@ ON CONFLICT (id) DO UPDATE SET
   plan = EXCLUDED.plan,
   updated_at = now();
 
--- Replace PASTE_BCRYPT_HASH_HERE with your bcrypt password hash.
 INSERT INTO public.users (
   id,
   org_id,
@@ -43,3 +75,34 @@ ON CONFLICT (email) DO UPDATE SET
   role = EXCLUDED.role,
   is_active = true,
   updated_at = now();
+
+INSERT INTO public.workspace (org_id, user_id, state)
+SELECT
+  u.org_id,
+  u.id,
+  jsonb_build_object(
+    'accounts', jsonb_build_array(),
+    'bankRules', jsonb_build_array(),
+    'manualRules', jsonb_build_array(),
+    'vendorNorm', jsonb_build_array(),
+    'expenseAP', jsonb_build_array(),
+    'ptAP', jsonb_build_array(),
+    'bankRows', jsonb_build_array(),
+    'manualRows', jsonb_build_array(),
+    'openingRows', jsonb_build_array(),
+    'posted', false,
+    'uploads', jsonb_build_array()
+  )
+FROM public.users u
+WHERE lower(u.email) = lower('s.jauhal@email.com')
+ON CONFLICT (org_id, user_id) DO NOTHING;
+
+SELECT
+  email,
+  org_id,
+  full_name,
+  role,
+  is_active,
+  password_hash IS NOT NULL AS has_password
+FROM public.users
+WHERE lower(email) = lower('s.jauhal@email.com');
