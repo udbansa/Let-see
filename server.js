@@ -28,15 +28,22 @@ const emptyState = {
   accounts: [],
   bankRules: [],
   manualRules: [],
+  intercompanyRules: [],
   vendorNorm: [],
+  vendors: [],
   expenseAP: [],
   ptAP: [],
   apVendor: [],
   bankRows: [],
+  bankStagingRows: [],
   manualRows: [],
   openingRows: [],
+  arRows: [],
+  apBills: [],
+  icLinks: [],
   posted: false,
-  uploads: []
+  uploads: [],
+  statementYear: '2021'
 };
 
 function publicUser(user) {
@@ -84,18 +91,23 @@ async function getAccounts(orgId) {
   return rows;
 }
 
-async function getWorkspace(orgId, userId) {
+async function getWorkspace(orgId, corporationId) {
   const { rows } = await pool.query(
     `SELECT state
      FROM public.workspace
-     WHERE org_id = $1 AND user_id = $2
+     WHERE org_id = $1 AND corporation_id = $2
      LIMIT 1`,
-    [orgId, userId]
+    [orgId, corporationId]
   );
 
   const saved = rows[0]?.state || {};
   const accounts = await getAccounts(orgId);
-  return { ...emptyState, ...saved, accounts };
+
+  return {
+    ...emptyState,
+    ...saved,
+    accounts
+  };
 }
 
 async function saveAccounts(orgId, accounts) {
@@ -144,7 +156,10 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
-    if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
 
     const { rows } = await pool.query(
       `SELECT u.*, o.slug AS org_slug
@@ -157,12 +172,21 @@ app.post('/api/auth/login', async (req, res) => {
     );
 
     const user = rows[0];
-    if (!user || !user.password_hash) return res.status(401).json({ error: 'Invalid email or password' });
+
+    if (!user || !user.password_hash) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
 
     const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) return res.status(401).json({ error: 'Invalid email or password' });
 
-    await pool.query('UPDATE public.users SET last_login_at = now() WHERE id = $1', [user.id]);
+    if (!ok) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    await pool.query(
+      'UPDATE public.users SET last_login_at = now() WHERE id = $1',
+      [user.id]
+    );
 
     res.json({
       token: signToken(user),
@@ -176,7 +200,8 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/state', auth, async (req, res) => {
   try {
-    const state = await getWorkspace(req.user.orgId, req.user.id);
+    const corporationId = String(req.query.corporationId || 'corp-919');
+    const state = await getWorkspace(req.user.orgId, corporationId);
     res.json(state);
   } catch (error) {
     console.error('state get error', error);
@@ -186,20 +211,47 @@ app.get('/api/state', auth, async (req, res) => {
 
 app.post('/api/state', auth, async (req, res) => {
   try {
-    const incoming = { ...emptyState, ...req.body };
+    const corporationId = String(req.body.corporationId || 'corp-919');
+    const corporationName = String(req.body.corporationName || '919 Corporation');
+
+    const incoming = {
+      ...emptyState,
+      ...(req.body.state || req.body)
+    };
+
+    delete incoming.corporationId;
+    delete incoming.corporationName;
+    delete incoming.state;
+
     const accounts = Array.isArray(incoming.accounts) ? incoming.accounts : [];
     delete incoming.accounts;
 
     await pool.query(
-      `INSERT INTO public.workspace (org_id, user_id, state)
-       VALUES ($1, $2, $3::jsonb)
-       ON CONFLICT (org_id, user_id)
-       DO UPDATE SET state = EXCLUDED.state, updated_at = now()`,
-      [req.user.orgId, req.user.id, JSON.stringify(incoming)]
+      `INSERT INTO public.workspace
+         (org_id, user_id, corporation_id, corporation_name, state)
+       VALUES
+         ($1, $2, $3, $4, $5::jsonb)
+       ON CONFLICT (org_id, corporation_id)
+       DO UPDATE SET
+         corporation_name = EXCLUDED.corporation_name,
+         state = EXCLUDED.state,
+         updated_at = now()`,
+      [
+        req.user.orgId,
+        req.user.id,
+        corporationId,
+        corporationName,
+        JSON.stringify(incoming)
+      ]
     );
 
     await saveAccounts(req.user.orgId, accounts);
-    res.json({ ok: true });
+
+    res.json({
+      ok: true,
+      corporationId,
+      corporationName
+    });
   } catch (error) {
     console.error('state save error', error);
     res.status(500).json({ error: 'Server error' });
@@ -230,17 +282,25 @@ app.get('/api/workflow/specs', auth, async (_req, res) => {
 app.post('/api/ingest/upload', auth, upload.single('file'), async (req, res) => {
   try {
     const file = req.file;
-    if (!file) return res.status(400).json({ error: 'No file uploaded' });
+
+    if (!file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
 
     const { rows } = await pool.query(
-      `INSERT INTO public.uploads (org_id, user_id, name, rows, status, payload)
-       VALUES ($1, $2, $3, 0, 'synced', $4::jsonb)
+      `INSERT INTO public.uploads
+         (org_id, user_id, name, rows, status, payload)
+       VALUES
+         ($1, $2, $3, 0, 'synced', $4::jsonb)
        RETURNING id`,
       [
         req.user.orgId,
         req.user.id,
         file.originalname,
-        JSON.stringify({ mimetype: file.mimetype, size: file.size })
+        JSON.stringify({
+          mimetype: file.mimetype,
+          size: file.size
+        })
       ]
     );
 
