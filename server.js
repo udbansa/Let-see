@@ -73,7 +73,7 @@ function auth(req, res, next) {
   }
 }
 
-async function getAccounts(orgId) {
+async function getAccounts(orgId, corporationId) {
   const { rows } = await pool.query(
     `SELECT
        id,
@@ -84,40 +84,53 @@ async function getAccounts(orgId) {
        fs_label AS "fsLabel",
        account_type AS "accountType"
      FROM public.accounts
-     WHERE org_id = $1 AND is_active = true
+     WHERE org_id = $1
+       AND (corporation_id = $2 OR corporation_id IS NULL)
+       AND is_active = true
      ORDER BY code`,
-    [orgId]
+    [orgId, corporationId]
   );
+
   return rows;
 }
 
 async function getWorkspace(orgId, corporationId) {
   const { rows } = await pool.query(
-    `SELECT state
+    `SELECT corporation_id, corporation_name, state
      FROM public.workspace
-     WHERE org_id = $1 AND corporation_id = $2
+     WHERE org_id = $1
+       AND corporation_id = $2
      LIMIT 1`,
     [orgId, corporationId]
   );
 
-  const saved = rows[0]?.state || {};
-  const accounts = await getAccounts(orgId);
+  if (!rows.length) return null;
+
+  const row = rows[0];
+  const saved = row.state || {};
+  const accounts = await getAccounts(orgId, corporationId);
 
   return {
-    ...emptyState,
-    ...saved,
-    accounts
+    corporationId: row.corporation_id,
+    corporationName: row.corporation_name,
+    state: {
+      ...emptyState,
+      ...saved,
+      accounts
+    }
   };
 }
 
-async function saveAccounts(orgId, accounts) {
+async function saveAccounts(orgId, corporationId, accounts) {
   for (const account of accounts || []) {
     if (!account.code || !account.name) continue;
 
     await pool.query(
-      `INSERT INTO public.accounts (org_id, code, name, sub_account, sub_linkage, fs_label, account_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (org_id, code)
+      `INSERT INTO public.accounts
+         (org_id, corporation_id, code, name, sub_account, sub_linkage, fs_label, account_type)
+       VALUES
+         ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (org_id, corporation_id, code)
        DO UPDATE SET
          name = EXCLUDED.name,
          sub_account = EXCLUDED.sub_account,
@@ -128,6 +141,7 @@ async function saveAccounts(orgId, accounts) {
          updated_at = now()`,
       [
         orgId,
+        corporationId,
         account.code,
         account.name,
         account.subAccount || account.sub_account || null,
@@ -140,7 +154,11 @@ async function saveAccounts(orgId, accounts) {
 }
 
 app.get('/', (_req, res) => {
-  res.json({ status: 'ok', app: 'Ledgr Undeniable API', ts: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    app: 'Ledgr API',
+    ts: new Date().toISOString()
+  });
 });
 
 app.get(['/health', '/api/health'], async (_req, res) => {
@@ -201,8 +219,13 @@ app.post('/api/auth/login', async (req, res) => {
 app.get('/api/state', auth, async (req, res) => {
   try {
     const corporationId = String(req.query.corporationId || 'corp-919');
-    const state = await getWorkspace(req.user.orgId, corporationId);
-    res.json(state);
+    const workspace = await getWorkspace(req.user.orgId, corporationId);
+
+    if (!workspace) {
+      return res.status(404).json({ notFound: true });
+    }
+
+    res.json(workspace);
   } catch (error) {
     console.error('state get error', error);
     res.status(500).json({ error: 'Server error' });
@@ -221,6 +244,10 @@ app.post('/api/state', auth, async (req, res) => {
 
     delete incoming.corporationId;
     delete incoming.corporationName;
+    delete incoming.corporation;
+    delete incoming.recordCount;
+    delete incoming.reason;
+    delete incoming.updatedAt;
     delete incoming.state;
 
     const accounts = Array.isArray(incoming.accounts) ? incoming.accounts : [];
@@ -233,6 +260,7 @@ app.post('/api/state', auth, async (req, res) => {
          ($1, $2, $3, $4, $5::jsonb)
        ON CONFLICT (org_id, corporation_id)
        DO UPDATE SET
+         user_id = EXCLUDED.user_id,
          corporation_name = EXCLUDED.corporation_name,
          state = EXCLUDED.state,
          updated_at = now()`,
@@ -245,12 +273,13 @@ app.post('/api/state', auth, async (req, res) => {
       ]
     );
 
-    await saveAccounts(req.user.orgId, accounts);
+    await saveAccounts(req.user.orgId, corporationId, accounts);
 
     res.json({
       ok: true,
       corporationId,
-      corporationName
+      corporationName,
+      state: incoming
     });
   } catch (error) {
     console.error('state save error', error);
@@ -258,9 +287,74 @@ app.post('/api/state', auth, async (req, res) => {
   }
 });
 
+app.post(['/api/backup', '/api/cloud-backup'], auth, async (req, res) => {
+  try {
+    const corporationId = String(req.body.corporationId || 'corp-919');
+    const corporationName = String(req.body.corporationName || '919 Corporation');
+    const backupJson = req.body.state || req.body.backup || req.body;
+    const recordCount = Number(req.body.recordCount || 0);
+    const reason = String(req.body.reason || 'cloud backup');
+
+    await pool.query(
+      `INSERT INTO public.workspace_backups
+         (org_id, user_id, corporation_id, corporation_name, backup_json, backup_reason, record_count)
+       VALUES
+         ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+      [
+        req.user.orgId,
+        req.user.id,
+        corporationId,
+        corporationName,
+        JSON.stringify(backupJson),
+        reason,
+        recordCount
+      ]
+    );
+
+    res.json({
+      ok: true,
+      corporationId,
+      corporationName
+    });
+  } catch (error) {
+    console.error('backup save error', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get(['/api/backup', '/api/cloud-backup'], auth, async (req, res) => {
+  try {
+    const corporationId = String(req.query.corporationId || 'corp-919');
+
+    const { rows } = await pool.query(
+      `SELECT corporation_id, corporation_name, backup_json
+       FROM public.workspace_backups
+       WHERE org_id = $1
+         AND corporation_id = $2
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [req.user.orgId, corporationId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ notFound: true });
+    }
+
+    res.json({
+      corporationId: rows[0].corporation_id,
+      corporationName: rows[0].corporation_name,
+      state: rows[0].backup_json
+    });
+  } catch (error) {
+    console.error('backup get error', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/accounts', auth, async (req, res) => {
   try {
-    res.json(await getAccounts(req.user.orgId));
+    const corporationId = String(req.query.corporationId || 'corp-919');
+    res.json(await getAccounts(req.user.orgId, corporationId));
   } catch {
     res.json([]);
   }
@@ -282,6 +376,7 @@ app.get('/api/workflow/specs', auth, async (_req, res) => {
 app.post('/api/ingest/upload', auth, upload.single('file'), async (req, res) => {
   try {
     const file = req.file;
+    const corporationId = String(req.body.corporationId || req.query.corporationId || 'corp-919');
 
     if (!file) {
       return res.status(400).json({ error: 'No file uploaded' });
@@ -289,13 +384,14 @@ app.post('/api/ingest/upload', auth, upload.single('file'), async (req, res) => 
 
     const { rows } = await pool.query(
       `INSERT INTO public.uploads
-         (org_id, user_id, name, rows, status, payload)
+         (org_id, user_id, corporation_id, name, rows, status, payload)
        VALUES
-         ($1, $2, $3, 0, 'synced', $4::jsonb)
+         ($1, $2, $3, $4, 0, 'synced', $5::jsonb)
        RETURNING id`,
       [
         req.user.orgId,
         req.user.id,
+        corporationId,
         file.originalname,
         JSON.stringify({
           mimetype: file.mimetype,
@@ -317,5 +413,5 @@ app.post('/api/ingest/upload', auth, upload.single('file'), async (req, res) => 
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Ledgr Undeniable API running on 0.0.0.0:${PORT}`);
+  console.log(`Ledgr API running on 0.0.0.0:${PORT}`);
 });
