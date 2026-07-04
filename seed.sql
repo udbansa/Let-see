@@ -1,40 +1,15 @@
 -- Safe login-only seed for Ledgr.
 -- Run this after 01_schema.sql.
---
--- IMPORTANT:
--- Replace PASTE_BCRYPT_HASH_HERE with your real bcrypt hash.
--- Do not put your plain SaaS password here.
+-- No chart of accounts. No business data.
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-ALTER TABLE public.organizations
-ADD COLUMN IF NOT EXISTS slug text;
-
-ALTER TABLE public.organizations
-ADD COLUMN IF NOT EXISTS plan text DEFAULT 'starter';
-
-ALTER TABLE public.organizations
-ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
-
-ALTER TABLE public.users
-ADD COLUMN IF NOT EXISTS org_id uuid;
-
-ALTER TABLE public.users
-ADD COLUMN IF NOT EXISTS full_name text;
-
-ALTER TABLE public.users
-ADD COLUMN IF NOT EXISTS password_hash text;
-
-ALTER TABLE public.users
-ADD COLUMN IF NOT EXISTS role text DEFAULT 'bookkeeper';
-
-ALTER TABLE public.users
-ADD COLUMN IF NOT EXISTS is_active boolean DEFAULT true;
-
-ALTER TABLE public.users
-ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
-
-INSERT INTO public.organizations (id, name, slug, plan)
+INSERT INTO public.organizations (
+  id,
+  name,
+  slug,
+  plan
+)
 VALUES (
   '00000000-0000-0000-0000-000000000001',
   'Jauhals Real Estate',
@@ -61,7 +36,7 @@ VALUES (
   '00000000-0000-0000-0000-000000000001',
   's.jauhal@email.com',
   'Surinder Jauhal',
-  'PASTE_BCRYPT_HASH_HERE',
+  '$2a$12$nb0kaOiEuK15OmjlRVSrZ.mTaYPUcZSY85PdDjtqbXzb8bcddMrem',
   'admin',
   true
 )
@@ -69,33 +44,49 @@ ON CONFLICT (email) DO UPDATE SET
   org_id = EXCLUDED.org_id,
   full_name = EXCLUDED.full_name,
   password_hash = CASE
-    WHEN EXCLUDED.password_hash = 'PASTE_BCRYPT_HASH_HERE' THEN public.users.password_hash
+    WHEN EXCLUDED.password_hash = '$2a$12$nb0kaOiEuK15OmjlRVSrZ.mTaYPUcZSY85PdDjtqbXzb8bcddMrem' THEN public.users.password_hash
     ELSE EXCLUDED.password_hash
   END,
   role = EXCLUDED.role,
   is_active = true,
   updated_at = now();
 
-INSERT INTO public.workspace (org_id, user_id, state)
+INSERT INTO public.workspace (
+  org_id,
+  user_id,
+  corporation_id,
+  corporation_name,
+  state
+)
 SELECT
   u.org_id,
   u.id,
+  'corp-919',
+  '919 Corporation',
   jsonb_build_object(
     'accounts', jsonb_build_array(),
     'bankRules', jsonb_build_array(),
     'manualRules', jsonb_build_array(),
+    'intercompanyRules', jsonb_build_array(),
     'vendorNorm', jsonb_build_array(),
+    'vendors', jsonb_build_array(),
     'expenseAP', jsonb_build_array(),
     'ptAP', jsonb_build_array(),
+    'apVendor', jsonb_build_array(),
     'bankRows', jsonb_build_array(),
+    'bankStagingRows', jsonb_build_array(),
     'manualRows', jsonb_build_array(),
     'openingRows', jsonb_build_array(),
+    'arRows', jsonb_build_array(),
+    'apBills', jsonb_build_array(),
+    'icLinks', jsonb_build_array(),
     'posted', false,
-    'uploads', jsonb_build_array()
+    'uploads', jsonb_build_array(),
+    'statementYear', '2021'
   )
 FROM public.users u
 WHERE lower(u.email) = lower('s.jauhal@email.com')
-ON CONFLICT (org_id, user_id) DO NOTHING;
+ON CONFLICT (org_id, corporation_id) DO NOTHING;
 
 SELECT
   email,
@@ -106,3 +97,10 @@ SELECT
   password_hash IS NOT NULL AS has_password
 FROM public.users
 WHERE lower(email) = lower('s.jauhal@email.com');
+
+SELECT
+  corporation_id,
+  corporation_name,
+  state
+FROM public.workspace
+ORDER BY corporation_name;
