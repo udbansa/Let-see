@@ -864,4 +864,3 @@ app.post('/api/ingest/upload', auth, upload.single('file'), async (req, res) => 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Ledgr API running on 0.0.0.0:${PORT}`);
 });
-```
