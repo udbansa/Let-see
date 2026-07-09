@@ -1,3 +1,6 @@
+Yes. Here is the complete corrected `server.js`:
+
+```js
 require('dotenv').config();
 
 const express = require('express');
@@ -77,6 +80,7 @@ async function getAccounts(orgId, corporationId) {
   const { rows } = await pool.query(
     `SELECT
        id,
+       corporation_id AS "corporationId",
        code,
        name,
        sub_account AS "subAccount",
@@ -85,7 +89,7 @@ async function getAccounts(orgId, corporationId) {
        account_type AS "accountType"
      FROM public.accounts
      WHERE org_id = $1
-       AND (corporation_id = $2 OR corporation_id IS NULL)
+       AND corporation_id = $2
        AND is_active = true
      ORDER BY code`,
     [orgId, corporationId]
@@ -121,35 +125,59 @@ async function getWorkspace(orgId, corporationId) {
   };
 }
 
-async function saveAccounts(orgId, corporationId, accounts) {
-  for (const account of accounts || []) {
-    if (!account.code || !account.name) continue;
+async function saveAccounts(orgId, corporationId, accounts, mode = 'replace') {
+  const client = await pool.connect();
 
-    await pool.query(
-      `INSERT INTO public.accounts
-         (org_id, corporation_id, code, name, sub_account, sub_linkage, fs_label, account_type)
-       VALUES
-         ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (org_id, corporation_id, code)
-       DO UPDATE SET
-         name = EXCLUDED.name,
-         sub_account = EXCLUDED.sub_account,
-         sub_linkage = EXCLUDED.sub_linkage,
-         fs_label = EXCLUDED.fs_label,
-         account_type = EXCLUDED.account_type,
-         is_active = true,
-         updated_at = now()`,
-      [
-        orgId,
-        corporationId,
-        account.code,
-        account.name,
-        account.subAccount || account.sub_account || null,
-        account.subLinkage || account.sub_linkage || null,
-        account.fsLabel || account.fs_label || 'Balance Sheet',
-        account.accountType || account.account_type || 'Asset'
-      ]
-    );
+  try {
+    await client.query('BEGIN');
+
+    if (mode === 'replace') {
+      await client.query(
+        `UPDATE public.accounts
+         SET is_active = false,
+             updated_at = now()
+         WHERE org_id = $1
+           AND corporation_id = $2`,
+        [orgId, corporationId]
+      );
+    }
+
+    for (const account of accounts || []) {
+      if (!account.code || !account.name) continue;
+
+      await client.query(
+        `INSERT INTO public.accounts
+           (org_id, corporation_id, code, name, sub_account, sub_linkage, fs_label, account_type, is_active)
+         VALUES
+           ($1, $2, $3, $4, $5, $6, $7, $8, true)
+         ON CONFLICT (org_id, corporation_id, code)
+         DO UPDATE SET
+           name = EXCLUDED.name,
+           sub_account = EXCLUDED.sub_account,
+           sub_linkage = EXCLUDED.sub_linkage,
+           fs_label = EXCLUDED.fs_label,
+           account_type = EXCLUDED.account_type,
+           is_active = true,
+           updated_at = now()`,
+        [
+          orgId,
+          corporationId,
+          account.code,
+          account.name,
+          account.subAccount || account.sub_account || null,
+          account.subLinkage || account.sub_linkage || null,
+          account.fsLabel || account.fs_label || 'Balance Sheet',
+          account.accountType || account.account_type || 'Asset'
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
@@ -273,13 +301,21 @@ app.post('/api/state', auth, async (req, res) => {
       ]
     );
 
-    await saveAccounts(req.user.orgId, corporationId, accounts);
+    await saveAccounts(
+      req.user.orgId,
+      corporationId,
+      accounts,
+      req.body.accountSyncMode || incoming.accountSyncMode || 'replace'
+    );
 
     res.json({
       ok: true,
       corporationId,
       corporationName,
-      state: incoming
+      state: {
+        ...incoming,
+        accounts
+      }
     });
   } catch (error) {
     console.error('state save error', error);
@@ -415,3 +451,4 @@ app.post('/api/ingest/upload', auth, upload.single('file'), async (req, res) => 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Ledgr API running on 0.0.0.0:${PORT}`);
 });
+```
